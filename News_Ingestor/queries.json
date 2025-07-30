@@ -1,0 +1,6 @@
+{
+    "default_search_query": "Chennai (traffic OR accident OR crime OR pothole OR flood OR pollution OR infrastructure)",
+    "test_search_query": "Chennai",
+    "broader_search_query": "Chennai (news OR city OR urban OR development OR issues)"
+  }
+  
