@@ -1,46 +1,59 @@
-# news_ingestor/main.py (Cloud Run FastAPI)
 import os
 import json
 import logging
-import httpx # For making asynchronous HTTP requests
-from datetime import datetime, timedelta, timezone
+import httpx
+from datetime import datetime, timedelta, timezone 
+import asyncio
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from google.cloud import pubsub_v1
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Configuration (from environment variables) ---
 GCP_PROJECT_ID = os.environ.get('GCP_PROJECT_ID', 'urbanlytic-466109')
-# Use the new topic name from config.py
 RAW_NEWS_TOPIC_NAME = os.environ.get('RAW_NEWS_TOPIC_NAME', 'raw-news-posts')
 
-# NewsAPI.org credentials and parameters
-# IMPORTANT: Replace with your actual API Key. Use Secret Manager in production.
 NEWS_API_KEY = os.environ.get('NEWS_API_KEY', 'YOUR_NEWSAPI_KEY')
 NEWS_API_BASE_URL = "https://newsapi.org/v2/everything"
 
-# Search parameters for urban incidents in Chennai
-# Keywords can be refined based on what you want to capture
-DEFAULT_SEARCH_QUERY = os.environ.get('DEFAULT_SEARCH_QUERY', 'Chennai (traffic OR accident OR crime OR pothole OR flood OR pollution OR infrastructure)')
-DEFAULT_LANGUAGE = os.environ.get('DEFAULT_LANGUAGE', 'en')
-DEFAULT_COUNTRY = os.environ.get('DEFAULT_COUNTRY', 'in') # Filter by articles mentioning India, though 'everything' endpoint is global
-DEFAULT_SORT_BY = os.environ.get('DEFAULT_SORT_BY', 'relevancy') # or 'publishedAt'
-FETCH_INTERVAL_MINUTES = int(os.environ.get('FETCH_INTERVAL_MINUTES', '60')) # Fetch news from the last X minutes
-MAX_ARTICLES_PER_RUN = int(os.environ.get('MAX_ARTICLES_PER_RUN', '50')) # Max articles to fetch per invocation
+DEFAULT_SEARCH_QUERY_ENV = os.environ.get('DEFAULT_SEARCH_QUERY', None)
 
-# Initialize FastAPI app
+QUERY_NAME_TO_USE = os.environ.get('QUERY_NAME_TO_USE', 'default_search_query')
+
+
+HARDCODED_FROM_DATE = "2025-07-29T00:00:00Z"
+HARDCODED_PAGE_SIZE = 10
+
+DEFAULT_LANGUAGE = os.environ.get('DEFAULT_LANGUAGE', 'en')
+DEFAULT_SORT_BY = os.environ.get('DEFAULT_SORT_BY', 'publishedAt') 
+
 app = FastAPI()
 
-# Initialize Pub/Sub Publisher Client globally
 publisher = pubsub_v1.PublisherClient()
 
-# Initialize HTTPX client globally for persistent connections
 http_client = httpx.AsyncClient()
+
+_queries = {}
+try:
+    with open(os.path.join(os.path.dirname(__file__), 'queries.json'), 'r') as f:
+        _queries = json.load(f)
+    logger.info("Queries loaded from queries.json.")
+except FileNotFoundError:
+    logger.warning("queries.json not found. Falling back to hardcoded defaults for query names if no direct query is provided.")
+    _queries = {
+        "default_search_query": "Chennai (traffic OR accident OR crime OR pothole OR flood OR pollution OR infrastructure)",
+        "test_search_query": "Chennai"
+    }
+except json.JSONDecodeError:
+    logger.error("Error decoding queries.json. Check JSON syntax. Falling back to hardcoded defaults.")
+    _queries = {
+        "default_search_query": "Chennai (traffic OR accident OR crime OR pothole OR flood OR pollution OR infrastructure)",
+        "test_search_query": "Chennai"
+    }
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -59,42 +72,48 @@ async def ingest_news(request: Request):
         logger.error("NewsAPI.org API Key is not configured. Please set NEWS_API_KEY environment variable.")
         return JSONResponse(content={"error": "NewsAPI.org API Key not configured"}, status_code=500)
 
-    try:
-        # Calculate time from which to fetch news (e.g., last 60 minutes)
-        from_time = datetime.now(timezone.utc) - timedelta(minutes=FETCH_INTERVAL_MINUTES)
-        from_iso = from_time.isoformat(timespec='seconds').replace('+00:00', 'Z')
+    if DEFAULT_SEARCH_QUERY_ENV:
+        current_search_query = DEFAULT_SEARCH_QUERY_ENV
+        logger.info(f"Using direct search query from environment variable: '{current_search_query}'")
+    else:
+        current_search_query = _queries.get(QUERY_NAME_TO_USE, _queries.get('default_search_query'))
+        logger.info(f"Using search query from queries.json (via QUERY_NAME_TO_USE='{QUERY_NAME_TO_USE}'): '{current_search_query}'")
 
+    if not current_search_query:
+        logger.error("Search query could not be determined from environment or queries.json.")
+        return JSONResponse(content={"error": "Search query not configured"}, status_code=500)
+
+
+    try:
         params = {
-            "q": DEFAULT_SEARCH_QUERY,
+            "q": current_search_query,
             "language": DEFAULT_LANGUAGE,
             "sortBy": DEFAULT_SORT_BY,
-            "from": from_iso,
-            "pageSize": MAX_ARTICLES_PER_RUN,
+            "from": HARDCODED_FROM_DATE, \
+            "pageSize": HARDCODED_PAGE_SIZE, \
             "apiKey": NEWS_API_KEY
         }
         
-        logger.info(f"Fetching news with query: '{DEFAULT_SEARCH_QUERY}' from {from_iso}")
+        logger.info(f"Fetching news with query: '{current_search_query}' from {HARDCODED_FROM_DATE} with pageSize={HARDCODED_PAGE_SIZE}")
         
         response = await http_client.get(NEWS_API_BASE_URL, params=params, timeout=30.0)
-        response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
+        response.raise_for_status() 
         
         news_data = response.json()
         articles = news_data.get('articles', [])
 
         if not articles:
-            logger.info(f"No new articles found for query: '{DEFAULT_SEARCH_QUERY}' in the last {FETCH_INTERVAL_MINUTES} minutes.")
-            return JSONResponse(content={"status": "No new articles"}, status_code=200)
+            logger.info(f"No articles found for query: '{current_search_query}' from {HARDCODED_FROM_DATE} with pageSize={HARDCODED_PAGE_SIZE}.")
+            return JSONResponse(content={"status": "No articles"}, status_code=200)
 
         articles_published_count = 0
         topic_path = publisher.topic_path(GCP_PROJECT_ID, RAW_NEWS_TOPIC_NAME)
 
         for article in articles:
-            # Basic validation and extraction
             if not article.get('title') or not article.get('url'):
                 logger.warning(f"Skipping article due to missing title or URL: {article}")
                 continue
 
-            # Prepare article data for Pub/Sub
             article_data = {
                 "title": article.get('title'),
                 "description": article.get('description'),
@@ -102,17 +121,17 @@ async def ingest_news(request: Request):
                 "publishedAt": article.get('publishedAt'),
                 "source_name": article.get('source', {}).get('name'),
                 "author": article.get('author'),
-                "content": article.get('content'), # May be truncated
-                "query_keywords": DEFAULT_SEARCH_QUERY,
-                "ingestedAt": datetime.now(timezone.utc).isoformat() # Timestamp of ingestion
+                "content": article.get('content'),
+                "query_keywords": current_search_query,
+                "ingestedAt": datetime.now(timezone.utc).isoformat()
             }
             
-            # Publish article data to Pub/Sub asynchronously
             message_data = json.dumps(article_data).encode('utf-8')
             future = publisher.publish(topic_path, message_data)
-            await future # Await the future directly
             
-            logger.info(f"Published article '{article.get('title')[:50]}...'")
+            message_id = await asyncio.get_event_loop().run_in_executor(None, future.result)
+            
+            logger.info(f"Published article '{article.get('title')[:50]}...' to Pub/Sub topic '{RAW_NEWS_TOPIC_NAME}' with message ID: {message_id}.")
             articles_published_count += 1
 
         logger.info(f"Successfully published {articles_published_count} articles to Pub/Sub topic '{RAW_NEWS_TOPIC_NAME}'.")
@@ -135,7 +154,7 @@ async def ingest_news(request: Request):
 if __name__ == '__main__':
     import uvicorn
     from dotenv import load_dotenv
-    load_dotenv() # Load .env for local testing
+    load_dotenv()
     
     port = int(os.environ.get('PORT', 8080))
     uvicorn.run(app, host='0.0.0.0', port=port)
