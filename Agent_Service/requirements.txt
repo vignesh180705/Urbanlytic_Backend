@@ -1,0 +1,8 @@
+firebase-admin==6.5.0
+google-cloud-aiplatform==1.115.0
+flask
+uvicorn
+gunicorn
+google-cloud-pubsub
+google-cloud-firestore
+python-dotenv
