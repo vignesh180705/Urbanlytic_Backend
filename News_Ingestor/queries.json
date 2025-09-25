@@ -1,6 +1,5 @@
 {
-    "default_search_query": "Chennai (traffic OR accident OR crime OR pothole OR flood OR pollution OR infrastructure)",
+    "default_search_query": "Chennai traffic OR Chennai accident OR Chennai crime OR Chennai pothole OR Chennai flood OR Chennai pollution OR Chennai infrastructure OR Chennai road",
     "test_search_query": "Chennai",
     "broader_search_query": "Chennai (news OR city OR urban OR development OR issues)"
-  }
-  
+}

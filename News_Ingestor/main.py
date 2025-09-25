@@ -9,23 +9,25 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from google.cloud import pubsub_v1
-
+from google.cloud import firestore
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-GCP_PROJECT_ID = os.environ.get('GCP_PROJECT_ID', 'urbanlytic-466109')
-RAW_NEWS_TOPIC_NAME = os.environ.get('RAW_NEWS_TOPIC_NAME', 'raw-news-posts')
+GCP_PROJECT_ID = 'oval-bot-472512-s4'
+RAW_NEWS_TOPIC_NAME = 'raw-news-posts'
 
-NEWS_API_KEY = os.environ.get('NEWS_API_KEY', 'YOUR_NEWSAPI_KEY')
+NEWS_API_KEY = 'fe151eb816a14267b4a6c5e2c30b50c3'
 NEWS_API_BASE_URL = "https://newsapi.org/v2/everything"
 
 DEFAULT_SEARCH_QUERY_ENV = os.environ.get('DEFAULT_SEARCH_QUERY', None)
 
 QUERY_NAME_TO_USE = os.environ.get('QUERY_NAME_TO_USE', 'default_search_query')
 
+db = firestore.Client()
 
-HARDCODED_FROM_DATE = "2025-07-29T00:00:00Z"
-HARDCODED_PAGE_SIZE = 10
+from_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+HARDCODED_FROM_DATE = "2025-09-24T00:00:00Z"
+HARDCODED_PAGE_SIZE = 1
 
 DEFAULT_LANGUAGE = os.environ.get('DEFAULT_LANGUAGE', 'en')
 DEFAULT_SORT_BY = os.environ.get('DEFAULT_SORT_BY', 'publishedAt') 
@@ -89,8 +91,9 @@ async def ingest_news(request: Request):
             "q": current_search_query,
             "language": DEFAULT_LANGUAGE,
             "sortBy": DEFAULT_SORT_BY,
-            "from": HARDCODED_FROM_DATE, \
-            "pageSize": HARDCODED_PAGE_SIZE, \
+            "from": HARDCODED_FROM_DATE, 
+            "pageSize": HARDCODED_PAGE_SIZE, 
+            "page": 1,
             "apiKey": NEWS_API_KEY
         }
         
@@ -108,7 +111,8 @@ async def ingest_news(request: Request):
 
         articles_published_count = 0
         topic_path = publisher.topic_path(GCP_PROJECT_ID, RAW_NEWS_TOPIC_NAME)
-
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        published_today = (today_str)
         for article in articles:
             if not article.get('title') or not article.get('url'):
                 logger.warning(f"Skipping article due to missing title or URL: {article}")
@@ -127,13 +131,13 @@ async def ingest_news(request: Request):
             }
             
             message_data = json.dumps(article_data).encode('utf-8')
-            future = publisher.publish(topic_path, message_data)
-            
-            message_id = await asyncio.get_event_loop().run_in_executor(None, future.result)
-            
-            logger.info(f"Published article '{article.get('title')[:50]}...' to Pub/Sub topic '{RAW_NEWS_TOPIC_NAME}' with message ID: {message_id}.")
+            #future = publisher.publish(topic_path, message_data)
+            db.collection("news").add(article_data)
+            logger.info(f"Published article '{article.get('title')[:50]}...' to Pub/Sub topic '{RAW_NEWS_TOPIC_NAME}'")
             articles_published_count += 1
-
+            if articles_published_count >= HARDCODED_PAGE_SIZE:
+                logger.info(f"Successfully published {articles_published_count} articles to Pub/Sub topic '{RAW_NEWS_TOPIC_NAME}'.")
+                return JSONResponse(content={"status": f"Successfully published {articles_published_count} articles"}, status_code=200)
         logger.info(f"Successfully published {articles_published_count} articles to Pub/Sub topic '{RAW_NEWS_TOPIC_NAME}'.")
         return JSONResponse(content={"status": f"Successfully published {articles_published_count} articles"}, status_code=200)
 
@@ -157,4 +161,5 @@ if __name__ == '__main__':
     load_dotenv()
     
     port = int(os.environ.get('PORT', 8080))
-    uvicorn.run(app, host='0.0.0.0', port=port)
+    uvicorn.run(app, host='0.0.0.0',port=port)
+
