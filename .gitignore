@@ -1,8 +1,1 @@
-AI_Agent\Urbanenv
-Data_Ingestor_Function\Urbanenv
-node_modules
-Urbanenv
-News_Ingestor\.env
-Sample_AI_Agent\.env
-News_Ingestor\nwenv
-Sample_Data_Ingestor_Function\.env
+*.env
