@@ -47,7 +47,7 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app()
 
 
-def update_specific_report(document_id, new_status):
+def update_specific_report(document_id, new_status, reason=None):
     """
     Finds a specific document by its ID in the UserReports collection
     and updates its status.
@@ -65,7 +65,8 @@ def update_specific_report(document_id, new_status):
         # 2. Update the 'status' field with the new value
         logger.info(f"Attempting to update document: {document_id}")
         doc_ref.update({
-            'status': new_status
+            'status': new_status,
+            'reason': reason if reason else ''
         })
 
         logger.info(f"Successfully updated status for report {document_id} to '{new_status}'")
@@ -165,18 +166,22 @@ def index():
         # Make Gemini call synchronously with timeout handling
         prompt_for_gemini = f"""
         You are an expert complaint analyst. You will be given a description of an urban complaint.
-        You are supposed to analyse and summarize it in a concise manner. If the description is not useful, say "Summary unavailable - insufficient data".
+        If the complaint is valid, provide a concise summary without changing the meaning.
+        If it is not a valid complaint, say "Summary unavailable - insufficient data. Reason: <Whatever the reason is for discarding the complaint>".
         Summarize the following urban incident: {incident_data.get('description', 'No description provided.')}
         
         Example:
         Input: "There is a large pothole on 5th Avenue causing traffic delays."
         Output: "Large pothole on 5th Avenue causing traffic delays."
 
+        Input: "Streetlight not working."
+        Output: "Streetlight malfunction reported."
+
         Input: "No issues, just a routine check."
-        Output: "Summary unavailable - insufficient data."
+        Output: "Summary unavailable - insufficient data. Reason: Not a valid complaint."
 
         Input: "oquehfqnl"
-        Output: "Summary unavailable - insufficient data."
+        Output: "Summary unavailable - insufficient data. Reason: The Complaint has no valid information."
         """
         logger.info(f"Making Gemini call for incident {incident_id}")
         
@@ -236,8 +241,10 @@ def index():
             
             return 'OK - Message Processed and AI Result Published (Simplified)', 200
         else:
+            reason = summary_from_gemini.split("Reason:")[-1].strip() if "Reason:" in summary_from_gemini else "Unknown"
+            logger.info(f"Gemini indicated to discard incident {incident_id}. Reason: {reason}")
             # Initialize the Firebase Admin SDK if not already done
-            update_specific_report(doc_id,'Discarded')
+            update_specific_report(doc_id,'Discarded',reason)
             logger.info(f"Skipping publishing for incident {incident_id} due to insufficient summary.   ")
             return 'OK - Message Processed but No Valid Summary to Publish', 200
     except (InvalidArgument, ResourceExhausted) as e:
